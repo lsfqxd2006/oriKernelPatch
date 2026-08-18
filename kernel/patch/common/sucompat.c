@@ -40,6 +40,8 @@
 #include <uapi/linux/limits.h>
 #include <predata.h>
 #include <kstorage.h>
+#include <linux/pid.h>
+#include <folkpatch_suaudit.h>
 #include <selinux_hide.h>
 
 const char sh_path[] = SH_PATH;
@@ -55,6 +57,7 @@ static const char *current_su_path = 0;
 
 static int su_kstorage_gid = -1;
 static int exclude_kstorage_gid = -1;
+static bool su_path_probe_hooks_registered;
 static void su_register_path_probe_hooks(void);
 static void su_unregister_path_probe_hooks(void);
 long kp_control_feature_sc(const char __user *uname, int state)
@@ -265,7 +268,12 @@ static void handle_before_execve(char **__user u_filename_p, char **__user uargv
 
         uid_t to_uid = profile.to_uid;
         const char *sctx = profile.scontext;
-        commit_su(to_uid, sctx);
+        if (!commit_su(to_uid, sctx)) {
+            folkpatch_suaudit_record(uid,
+                                     __task_pid_nr_ns(current, PIDTYPE_PID, 0),
+                                     __task_pid_nr_ns(current, PIDTYPE_TGID, 0),
+                                     to_uid, sctx, get_task_comm(current));
+        }
 
 #ifdef ANDROID
         struct file *filp = filp_open(apd_path, O_RDONLY, 0);
@@ -496,6 +504,9 @@ int su_compat_init()
     exclude_kstorage_gid = try_alloc_kstroage_group();
     if (exclude_kstorage_gid != KSTORAGE_EXCLUDE_LIST_GROUP) return -ENOMEM;
 
+    /* SU remains available if the optional audit storage cannot initialize. */
+    folkpatch_suaudit_init();
+
 #ifdef ANDROID
     // default shell
     if (!all_allow_sctx[0]) {
@@ -555,6 +566,9 @@ static void su_register_path_probe_hooks(void)
     #endif
     hook_err_t rc;
 
+    if (su_path_probe_hooks_registered)
+        return;
+
     rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, (void *)0);
     log_boot("hook __NR3264_fstatat rc: %d\n", rc);
 
@@ -567,14 +581,20 @@ static void su_register_path_probe_hooks(void)
 
     rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, (void *)0);
     log_boot("hook 32 __NR_faccessat rc: %d\n", rc);
+
+    su_path_probe_hooks_registered = true;
 }
 
 static void su_unregister_path_probe_hooks(void)
 {
+    if (!su_path_probe_hooks_registered)
+        return;
+
     unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
     unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
     unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
     unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+    su_path_probe_hooks_registered = false;
 }
 
 void sucompat_init()

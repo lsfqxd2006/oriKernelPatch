@@ -31,6 +31,10 @@
 #include <sucompat.h>
 #include <accctl.h>
 #include <kstorage.h>
+#include <folkpatch_supercall.h>
+#include <folkpatch_suaudit.h>
+#include <linux/pid.h>
+#include <linux/sched/task.h>
 #ifdef ANDROID
 #include <userd.h>
 #endif
@@ -138,16 +142,41 @@ static long call_su(struct su_profile *__user uprofile)
     if (!profile || IS_ERR(profile)) return PTR_ERR(profile);
     profile->scontext[sizeof(profile->scontext) - 1] = '\0';
     int rc = commit_su(profile->to_uid, profile->scontext);
+    if (!rc) {
+        folkpatch_suaudit_record(current_uid(),
+                                 __task_pid_nr_ns(current, PIDTYPE_PID, 0),
+                                 __task_pid_nr_ns(current, PIDTYPE_TGID, 0),
+                                 profile->to_uid, profile->scontext,
+                                 get_task_comm(current));
+    }
     kvfree(profile);
     return rc;
 }
 
 static long call_su_task(pid_t pid, struct su_profile *__user uprofile)
 {
+    uid_t source_uid = current_uid();
+    pid_t source_pid = pid;
+    pid_t source_tgid = pid;
+    char source_comm[TASK_COMM_LEN] = { 0 };
     struct su_profile *profile = memdup_user(uprofile, sizeof(struct su_profile));
     if (!profile || IS_ERR(profile)) return PTR_ERR(profile);
     profile->scontext[sizeof(profile->scontext) - 1] = '\0';
+    struct task_struct *task = find_get_task_by_vpid(pid);
+    if (task) {
+        struct cred *cred = *(struct cred **)((uintptr_t)task + task_struct_offset.cred_offset);
+        source_uid = *(uid_t *)((uintptr_t)cred + cred_offset.uid_offset);
+        source_pid = __task_pid_nr_ns(task, PIDTYPE_PID, 0);
+        source_tgid = __task_pid_nr_ns(task, PIDTYPE_TGID, 0);
+        strncpy(source_comm, get_task_comm(task), sizeof(source_comm) - 1);
+        __put_task_struct(task);
+    }
     int rc = task_su(pid, profile->to_uid, profile->scontext);
+    if (!rc) {
+        folkpatch_suaudit_record(source_uid, source_pid, source_tgid,
+                                 profile->to_uid, profile->scontext,
+                                 source_comm);
+    }
     kvfree(profile);
     return rc;
 }
@@ -361,6 +390,10 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         break;
     }
 
+    if (folkpatch_supercall_cmd(cmd)) {
+        return folkpatch_supercall(is_authed, cmd, arg1, arg2, arg3, arg4);
+    }
+
     switch (cmd) {
     case SUPERCALL_KPM_LOAD:
         return call_kpm_load((const char *__user)arg1, (const char *__user)arg2, (void *__user)arg3);
@@ -399,23 +432,37 @@ static void before(hook_fargs6_t *args, void *udata)
 
     int is_trusted_caller = 0;
     int is_authed = 0;
-    if (has_preset_superkey()) {
+    int has_preset = has_preset_superkey();
+    if (has_preset) {
         const char *__user key_user = (const char *__user)syscall_argn(args, 0);
         
         char key[MAX_KEY_LEN];
         long len = compat_strncpy_from_user(key, key_user, MAX_KEY_LEN);
-        if (len <= 0) return;
+        if (len <= 0) {
+            logkfi("[diag:sc] uid=%d has_preset=%d key_copy_fail len=%ld\n", uid, has_preset, len);
+            return;
+        }
         is_authed = !auth_superkey(key);
         is_trusted_caller = is_authed;
     }
-    if (is_trusted_manager_uid(uid)) {
+    int is_tm = is_trusted_manager_uid(uid);
+    int is_su = is_su_allow_uid(uid);
+    if (is_tm) {
         is_trusted_caller = 1;
         is_authed = 1;
-    } else if (is_su_allow_uid(uid)) {
+    } else if (is_su) {
         is_trusted_caller = 1;
+        /* When no superkey is configured at build time the runtime key is
+         * randomly generated and never usable for authentication; in that mode
+         * an already-trusted su caller must count as fully authenticated, or
+         * the APD (uid 0) cannot load KPMs at boot. */
+        if (!has_preset) is_authed = 1;
     }
-
-    if (!is_trusted_caller) return;
+    if (!is_trusted_caller) {
+        logkfi("[diag:sc] uid=%d has_preset=%d is_tm=%d is_su=%d denied\n",
+               uid, has_preset, is_tm, is_su);
+        return;
+    }
 
     long ver_xx_cmd = (long)syscall_argn(args, 1);
     long cmd = ver_xx_cmd & 0xFFFF;
