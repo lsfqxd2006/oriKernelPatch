@@ -915,12 +915,14 @@ int repack_bootimg_mem(const char *orig_boot_path,
     uint8_t *rest_buf = NULL;
     uint32_t rest_buf_offset  = 0;
     if (rest_data_size > 0) {
-        // calloc so the last sizeof(avb) bytes (not read from file, they hold the
-        // separate AVB footer) are deterministic instead of heap garbage
         rest_buf_tmp = calloc(1, rest_data_size);
+        if (!rest_buf_tmp) return -1;
         fseek(f_orig, rest_data_offset, SEEK_SET);
-        fread(rest_buf_tmp, 1, rest_data_size-sizeof(avb), f_orig);
-        for (int32_t i = (int32_t)(rest_data_size - sizeof(avb)) - 1; i >= 0; i--) {
+        // The trailing AVB footer is handled separately below. Keep the
+        // temporary buffer zero-filled there and scan only actual payload.
+        uint32_t rest_payload_size = rest_data_size > sizeof(avb) ? rest_data_size - sizeof(avb) : 0;
+        fread(rest_buf_tmp, 1, rest_payload_size, f_orig);
+        for (int32_t i = (int32_t)rest_payload_size - 1; i >= 0; i--) {
             if (rest_buf_tmp[i] != 0) {
                 rest_buf_offset = (uint32_t)(i + 1);
                 break;

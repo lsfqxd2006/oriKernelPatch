@@ -24,6 +24,11 @@
 #define APK_SIG_SCHEME_V31_BLOCK_ID 0x1b93ad61u
 #define APK_CERT_MAX_LENGTH 4096
 
+/* FolkPatch fork: only trust the FolkPatch manager (me.yuki.folk). Upstream
+ * APatch (me.bmax.apatch) and the demo package are intentionally NOT trusted:
+ * the LKM crowns the FIRST base.apk in /data/app that matches any entry, so
+ * keeping upstream entries here lets an installed APatch shadow FolkPatch and
+ * take over manager authority (FolkPatch then gets no root). */
 const struct kp_trusted_manager kp_trusted_managers[] = {
 	{
 		.package = "me.yuki.folk",

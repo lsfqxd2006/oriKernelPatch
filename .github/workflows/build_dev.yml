@@ -1,0 +1,258 @@
+name: Build DEV CI
+
+on:
+  push:
+    branches: ["dev", "feature/p8-compat-fixes"]
+    paths:
+      - ".github/workflows/build_dev.yml"
+      - "kernel/**"
+      - "user/**"
+      - "tools/**"
+      - "version"
+  pull_request:
+    branches: ["dev"]
+    paths:
+      - ".github/workflows/build_dev.yml"
+      - "kernel/**"
+      - "user/**"
+      - "tools/**"
+      - "version"
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  Build-kpimg:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+      - name: Generate version
+        id: parse_version
+        run: |
+          MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
+          MINOR=$(grep '#define MINOR' version | awk '{print $3}')
+          PATCH=$(grep '#define PATCH' version | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+      - name: Install Compiler
+        run: |
+          curl -o arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+          tar -Jxf arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+      - name: Build kpimg
+        run: |
+          set -o pipefail
+          export TARGET_COMPILE=`pwd`/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
+          cd kernel
+
+          export ANDROID=1
+          make hdr kpimg 2>&1 | tee ../kpimg-build.log
+          mv kpimg kpimg-android
+          mv kpimg.elf kpimg.elf-android
+          make clean
+
+          unset ANDROID
+          make 2>&1 | tee -a ../kpimg-build.log
+          mv kpimg kpimg-linux
+          mv kpimg.elf kpimg.elf-linux
+
+          cd ..
+          cd kpms
+
+          cd demo-hello
+          make
+          mv hello.kpm demo-hello.kpm
+
+          cd ../demo-inlinehook
+          make
+          mv inlinehook.kpm demo-inlinehook.kpm
+
+          cd ../demo-syscallhook
+          make
+          mv syscallhook.kpm demo-syscallhook.kpm
+
+      - name: Upload kpimg artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: warn
+          path: |
+            kpimg-build.log
+            kernel/kpimg-linux
+            kernel/kpimg-android
+            kernel/kpimg-x86
+            kernel/kpimg.elf-linux
+            kernel/kpimg.elf-android
+            kernel/kpimg-x86.elf
+            kpms/demo-hello/demo-hello.kpm
+            kpms/demo-inlinehook/demo-inlinehook.kpm
+            kpms/demo-syscallhook/demo-syscallhook.kpm
+          name: kernelpatch-${{ github.sha }}
+          retention-days: 14
+
+  Release-user-lib:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+      - name: Generate version
+        id: parse_version
+        run: |
+          MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
+          MINOR=$(grep '#define MINOR' version | awk '{print $3}')
+          PATCH=$(grep '#define PATCH' version | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Zip-lib
+        run: |
+          export TARGET_COMPILE=placeholder
+          cd kernel
+          make hdr
+          cd ..
+          zip -r kpuser.zip user
+
+      - name: Upload user library
+        uses: actions/upload-artifact@v4
+        with:
+          name: kpuser-${{ github.sha }}
+          path: kpuser.zip
+          retention-days: 14
+
+  Build-android-kptools:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+      - name: Generate version
+        id: parse_version
+        run: |
+          MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
+          MINOR=$(grep '#define MINOR' version | awk '{print $3}')
+          PATCH=$(grep '#define PATCH' version | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Make hdr
+        run: |
+          export TARGET_COMPILE=placeholder
+          cd kernel
+          make hdr
+
+      - name: Build kptools-android
+        run: |
+          cd tools
+          mkdir -p build/android && cd build/android
+          echo ${{ steps.setup-ndk.outputs.ndk-path }}
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_PLATFORM=android-33 \
+            -DANDROID_ABI=arm64-v8a ../..
+          cmake --build .
+          mv kptools kptools-android
+
+      - name: Upload Android kptools
+        uses: actions/upload-artifact@v4
+        with:
+          name: kptools-android-${{ github.sha }}
+          path: tools/build/android/kptools-android
+          retention-days: 14
+
+  Build-kptools-linux:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+      - name: Generate version
+        id: parse_version
+        run: |
+          MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
+          MINOR=$(grep '#define MINOR' version | awk '{print $3}')
+          PATCH=$(grep '#define PATCH' version | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Make hdr
+        run: |
+          export TARGET_COMPILE=placeholder
+          cd kernel
+          make hdr
+
+      - name: Build kptools
+        run: |
+          export ANDROID=1
+          cd tools
+          mkdir -p build && cd build
+          cmake ..
+          make
+          mv kptools kptools-linux
+
+      - name: Upload Linux kptools
+        uses: actions/upload-artifact@v4
+        with:
+          name: kptools-linux-${{ github.sha }}
+          path: tools/build/kptools-linux
+          retention-days: 14
+
+  Build-kptools-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+      - name: Generate version
+        id: parse_version
+        run: |
+          MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
+          MINOR=$(grep '#define MINOR' version | awk '{print $3}')
+          PATCH=$(grep '#define PATCH' version | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Generated Version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Make hdr
+        run: |
+          export TARGET_COMPILE=placeholder
+          cd kernel
+          make hdr
+
+      - name: Build kptools
+        run: |
+          export ANDROID=1
+          cd tools
+          mkdir -p build && cd build
+          cmake ..
+          make
+          mv kptools kptools-mac
+      - name: Upload macOS kptools
+        uses: actions/upload-artifact@v4
+        with:
+          name: kptools-macos-${{ github.sha }}
+          path: tools/build/kptools-mac
+          retention-days: 14

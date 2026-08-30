@@ -77,6 +77,11 @@ struct trusted_manager_entry {
     const uint8_t digest[TRUSTED_MANAGER_DIGEST_LEN];
 };
 
+/* FolkPatch fork: only trust the FolkPatch manager (me.yuki.folk). Upstream
+ * APatch (me.bmax.apatch) and the demo package are intentionally NOT trusted:
+ * the first matching base.apk in /data/app is crowned as the manager, so
+ * keeping upstream entries would let an installed APatch shadow FolkPatch and
+ * take over manager authority (FolkPatch then gets no root). */
 static const struct trusted_manager_entry trusted_managers[] = {
     {
         "me.yuki.folk",
