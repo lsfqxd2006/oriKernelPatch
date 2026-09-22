@@ -640,6 +640,9 @@ static void su_register_path_probe_hooks(void)
     #endif
     hook_err_t rc;
 
+    if (su_path_probe_hooks_registered)
+        return;
+
     /* udata == 1 tells the callback the dispatcher gate already handled the uid
      * check; without the global dispatcher it must do the check itself. */
     void *gated = syscall_hook_global_enabled() ? (void *)1 : (void *)0;
